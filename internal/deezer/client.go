@@ -45,6 +45,11 @@ var ErrNoNetwork = errors.New("no internet connection")
 // failure instead of a silent clip downgrade.
 var ErrNoFullMedia = errors.New("no full-length media available for this account")
 
+// ErrProfileUnavailable is returned by Login when the selected Family profile
+// could not be entered. The session is still logged in (as the account's default
+// profile) and the selection is cleared, so callers may treat it as a warning.
+var ErrProfileUnavailable = errors.New("family profile unavailable")
+
 // classifyNet wraps err with ErrNoNetwork when it is a transport/reachability
 // failure (so errors.Is(err, ErrNoNetwork) holds), and returns err unchanged
 // otherwise. Every c.http.Do call site pipes its transport error through this so
@@ -165,6 +170,7 @@ type Client struct {
 	offerName    string // e.g. "Deezer Premium", "Deezer Free"
 	canHiFi      bool   // account entitled to lossless
 	canHQ        bool   // account entitled to MP3_320
+	profileID    string // Family profile to switch to after login ("" = default)
 
 	// Free-tier ads / listen logging (see ads.go). adMu guards the cadence state.
 	adMu        sync.Mutex
@@ -274,13 +280,53 @@ func (c *Client) cookie() string {
 }
 
 // Login authenticates and fetches api_token + license_token + sid + user id.
+// When a Family profile is selected (SetProfileID), the fresh session is then
+// switched to it with user.loginMulti, exactly like deezer.com's profile picker,
+// and the user data re-fetched on that same sid. Re-logins (e.g. gw's stale-token
+// retry) therefore keep the chosen profile instead of falling back to the
+// account's default one.
 func (c *Client) Login() error {
+	if err := c.loginSession(""); err != nil {
+		return err
+	}
+	c.mu.RLock()
+	want, have := c.profileID, c.userID
+	c.mu.RUnlock()
+	if want == "" || want == have {
+		return nil
+	}
+	body, err := c.gwRaw("user.loginMulti", fmt.Sprintf(`{"account_id":%s}`, want))
+	if err != nil {
+		return err
+	}
+	if gwErr := gwError(body); gwErr != "" {
+		// The profile isn't reachable from this ARL (another account, member
+		// removed from the plan…). The default-profile session is still valid:
+		// keep it rather than locking the user out of logging in at all.
+		c.mu.Lock()
+		if c.profileID == want {
+			c.profileID = ""
+		}
+		c.mu.Unlock()
+		return fmt.Errorf("%w: deezer gw user.loginMulti: %s", ErrProfileUnavailable, gwErr)
+	}
+	// Same sid, now bound to the chosen profile: reload its identity + tokens.
+	return c.loginSession(c.cookie())
+}
+
+// loginSession runs deezer.getUserData and commits the session fields. cookie
+// is the Cookie header to send; "" starts a fresh session from the ARL alone.
+func (c *Client) loginSession(cookie string) error {
+	reuse := cookie != ""
+	if !reuse {
+		cookie = "arl=" + c.arl
+	}
 	u := gwURL + "?method=deezer.getUserData&input=3&api_version=1.0&api_token="
 	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Cookie", "arl="+c.arl)
+	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
@@ -290,12 +336,17 @@ func (c *Client) Login() error {
 	}
 	defer resp.Body.Close()
 
-	// Pull sid from Set-Cookie.
+	// Pull sid from Set-Cookie; when reusing a session Deezer may not resend it.
 	var sid string
 	for _, ck := range resp.Cookies() {
 		if strings.EqualFold(ck.Name, "sid") {
 			sid = ck.Value
 		}
+	}
+	if sid == "" && reuse {
+		c.mu.RLock()
+		sid = c.sid
+		c.mu.RUnlock()
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -449,7 +500,7 @@ func (c *Client) gw(method, jsonBody string) ([]byte, error) {
 	gwErr := gwError(body)
 	if gwErr != "" && strings.Contains(gwErr, "TOKEN") {
 		// Stale token: re-login once and retry.
-		if err := c.Login(); err != nil {
+		if err := c.Login(); err != nil && !errors.Is(err, ErrProfileUnavailable) {
 			return nil, fmt.Errorf("re-login: %w", err)
 		}
 		body, err = c.gwRaw(method, jsonBody)
