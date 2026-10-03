@@ -754,4 +754,10 @@
   <data name="Dialog_SwitchProfileFailedBody" xml:space="preserve">
     <value>Deezer ने यह प्रोफ़ाइल खोलने की अनुमति नहीं दी। अपना कनेक्शन जाँचें और फिर कोशिश करें।</value>
   </data>
+  <data name="Dialog_ProfileNotSavedTitle" xml:space="preserve">
+    <value>प्रोफ़ाइल सहेजी नहीं गई</value>
+  </data>
+  <data name="Dialog_ProfileNotSavedBody" xml:space="preserve">
+    <value>अब आप इस प्रोफ़ाइल पर हैं, लेकिन OpenDeezer यह चुनाव सहेज नहीं सका। अगली बार आपकी पिछली प्रोफ़ाइल खुलेगी।</value>
+  </data>
 </root>

@@ -752,6 +752,12 @@
     <value>Impossible de changer de profil</value>
   </data>
   <data name="Dialog_SwitchProfileFailedBody" xml:space="preserve">
-    <value>Deezer n'a pas autorisé l'ouverture de ce profil. Vérifie ta connexion et réessaie.</value>
+    <value>Deezer n'a pas autorisé l'ouverture de ce profil. Vérifiez votre connexion et réessayez.</value>
+  </data>
+  <data name="Dialog_ProfileNotSavedTitle" xml:space="preserve">
+    <value>Profil non enregistré</value>
+  </data>
+  <data name="Dialog_ProfileNotSavedBody" xml:space="preserve">
+    <value>Vous êtes maintenant sur ce profil, mais OpenDeezer n'a pas pu enregistrer ce choix. Au prochain lancement, votre profil précédent sera ouvert.</value>
   </data>
 </root>

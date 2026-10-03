@@ -814,4 +814,10 @@
   <data name="Dialog_SwitchProfileFailedBody" xml:space="preserve">
     <value>لم يسمح Deezer بفتح هذا الملف الشخصي. تحقّق من اتصالك وحاول مرة أخرى.</value>
   </data>
+  <data name="Dialog_ProfileNotSavedTitle" xml:space="preserve">
+    <value>لم يتم حفظ الملف الشخصي</value>
+  </data>
+  <data name="Dialog_ProfileNotSavedBody" xml:space="preserve">
+    <value>أنت الآن على هذا الملف الشخصي، لكن تعذّر على OpenDeezer حفظ هذا الاختيار. سيُفتح ملفك الشخصي السابق عند التشغيل التالي.</value>
+  </data>
 </root>

@@ -1204,8 +1204,9 @@ public sealed partial class MainWindow : Window
     private async Task SwitchProfile(string userId)
     {
         _nowTitle.Text = Loc.S("Status_SwitchingProfile");
-        bool ok = await Task.Run(() => DeezerCore.DZSwitchProfile(userId) != 0);
-        if (!ok)
+        // 0 = failed (old profile kept), 1 = switched, 2 = switched but not saved.
+        int res = await Task.Run(() => DeezerCore.DZSwitchProfile(userId));
+        if (res == 0)
         {
             _nowTitle.Text = Loc.S("Status_NotPlaying");
             await ShowMessage(Loc.S("Dialog_SwitchProfileFailedTitle"), Loc.S("Dialog_SwitchProfileFailedBody"));
@@ -1213,6 +1214,7 @@ public sealed partial class MainWindow : Window
         }
         // Same reload path as an account switch: new tier, liked ids, Home.
         FinishLogin();
+        if (res == 2) await ShowMessage(Loc.S("Dialog_ProfileNotSavedTitle"), Loc.S("Dialog_ProfileNotSavedBody"));
     }
 
     private async void ShowLoginChoice()

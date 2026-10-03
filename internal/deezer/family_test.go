@@ -18,6 +18,8 @@ type fakeFamily struct {
 	members   map[string]bool // USER_IDs loginMulti accepts
 	multiBody string          // last user.loginMulti body
 	multiCk   string          // last user.loginMulti Cookie header
+	ignore    bool            // loginMulti answers OK but doesn't rebind the sid
+	onMulti   func()          // hook run while user.loginMulti is in flight
 }
 
 func (f *fakeFamily) client(t *testing.T) *Client {
@@ -50,6 +52,12 @@ func (f *fakeFamily) client(t *testing.T) *Client {
 			return resp, nil
 		case strings.Contains(q, "method=user.loginMulti"):
 			f.multiBody, f.multiCk = string(body), ck
+			if f.onMulti != nil {
+				f.onMulti()
+			}
+			if f.ignore {
+				return jsonResponse([]byte(`{"error":[],"results":true}`)), nil
+			}
 			var id string
 			fmt.Sscanf(string(body), `{"account_id":%s`, &id)
 			id = strings.TrimSuffix(id, "}")
@@ -121,6 +129,38 @@ func TestLogin_UnavailableProfileFallsBackToDefault(t *testing.T) {
 	}
 	if c.ProfileID() != "" {
 		t.Errorf("stale selection not cleared: %q", c.ProfileID())
+	}
+}
+
+func TestLogin_NeverPublishesDefaultProfileMidSwitch(t *testing.T) {
+	f := newFakeFamily()
+	c := f.client(t)
+	_ = c.SetProfileID("2")
+	f.onMulti = func() {
+		// A concurrent reader (browse, like…) during the switch must not see the
+		// default profile's identity or token.
+		if uid, tok := c.UserID(), c.apiTok(); uid == "1" || tok == "tok-1" {
+			t.Errorf("default profile published mid-switch: uid=%q tok=%q", uid, tok)
+		}
+	}
+	if err := c.Login(); err != nil {
+		t.Fatal(err)
+	}
+	if c.UserID() != "2" {
+		t.Fatalf("UserID = %q, want 2", c.UserID())
+	}
+}
+
+func TestLogin_IgnoredSwitchIsProfileUnavailable(t *testing.T) {
+	f := newFakeFamily()
+	f.ignore = true
+	c := f.client(t)
+	_ = c.SetProfileID("2")
+	if err := c.Login(); !errors.Is(err, ErrProfileUnavailable) {
+		t.Fatalf("err = %v, want ErrProfileUnavailable", err)
+	}
+	if c.UserID() != "1" || c.ProfileID() != "" {
+		t.Fatalf("uid=%q profile=%q, want default session + cleared selection", c.UserID(), c.ProfileID())
 	}
 }
 

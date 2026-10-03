@@ -754,4 +754,10 @@
   <data name="Dialog_SwitchProfileFailedBody" xml:space="preserve">
     <value>Deezer didn't let OpenDeezer open this profile. Check your connection and try again.</value>
   </data>
+  <data name="Dialog_ProfileNotSavedTitle" xml:space="preserve">
+    <value>Profile not saved</value>
+  </data>
+  <data name="Dialog_ProfileNotSavedBody" xml:space="preserve">
+    <value>You're now on this profile, but OpenDeezer couldn't save the choice. The next launch will open your previous profile.</value>
+  </data>
 </root>

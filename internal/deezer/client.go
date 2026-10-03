@@ -157,6 +157,9 @@ type Client struct {
 	http            *http.Client
 	restURLOverride string // override for testing REST API base URL
 
+	// loginMu serializes whole Login calls (a Family switch is several requests).
+	loginMu sync.Mutex
+
 	// mu guards every session/identity field below: they are (re)written by
 	// Login, which can now run concurrently with reads from the control-API HTTP
 	// goroutine (browse) and Bubble Tea command goroutines. All writes happen in
@@ -272,11 +275,14 @@ func (c *Client) cookie() string {
 	c.mu.RLock()
 	sid := c.sid
 	c.mu.RUnlock()
-	ck := "arl=" + c.arl // arl is immutable after New
-	if sid != "" {
-		ck += "; sid=" + sid
-	}
-	return ck
+	return c.sessionCookie(sid)
+}
+
+// session is one getUserData result, staged before it is published to the
+// Client so a multi-step login never exposes an intermediate identity.
+type session struct {
+	sid, apiToken, userID, licenseToken, userName, offerName string
+	canHQ, canHiFi                                           bool
 }
 
 // Login authenticates and fetches api_token + license_token + sid + user id.
@@ -285,46 +291,88 @@ func (c *Client) cookie() string {
 // and the user data re-fetched on that same sid. Re-logins (e.g. gw's stale-token
 // retry) therefore keep the chosen profile instead of falling back to the
 // account's default one.
+//
+// Every step works on staged values; only the final session is committed, in
+// one locked block, so concurrent readers never see the default profile's
+// identity in the middle of a switch. loginMu serializes whole logins.
 func (c *Client) Login() error {
-	if err := c.loginSession(""); err != nil {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+
+	s, err := c.fetchSession("arl="+c.arl, "")
+	if err != nil {
 		return err
 	}
-	c.mu.RLock()
-	want, have := c.profileID, c.userID
-	c.mu.RUnlock()
-	if want == "" || want == have {
+	want := c.ProfileID()
+	if want == "" || want == s.userID {
+		c.commitSession(s)
 		return nil
 	}
-	body, err := c.gwRaw("user.loginMulti", fmt.Sprintf(`{"account_id":%s}`, want))
+	body, err := c.gwRawWith(s.apiToken, c.sessionCookie(s.sid), "user.loginMulti", fmt.Sprintf(`{"account_id":%s}`, want))
 	if err != nil {
 		return err
 	}
 	if gwErr := gwError(body); gwErr != "" {
-		// The profile isn't reachable from this ARL (another account, member
-		// removed from the plan…). The default-profile session is still valid:
-		// keep it rather than locking the user out of logging in at all.
-		c.mu.Lock()
-		if c.profileID == want {
-			c.profileID = ""
-		}
-		c.mu.Unlock()
-		return fmt.Errorf("%w: deezer gw user.loginMulti: %s", ErrProfileUnavailable, gwErr)
+		return c.profileUnavailable(s, want, "deezer gw user.loginMulti: "+gwErr)
 	}
 	// Same sid, now bound to the chosen profile: reload its identity + tokens.
-	return c.loginSession(c.cookie())
+	s2, err := c.fetchSession(c.sessionCookie(s.sid), s.sid)
+	if err != nil {
+		return err
+	}
+	if s2.userID != want {
+		return c.profileUnavailable(s2, want, "session still on user "+s2.userID)
+	}
+	c.commitSession(s2)
+	return nil
 }
 
-// loginSession runs deezer.getUserData and commits the session fields. cookie
-// is the Cookie header to send; "" starts a fresh session from the ARL alone.
-func (c *Client) loginSession(cookie string) error {
-	reuse := cookie != ""
-	if !reuse {
-		cookie = "arl=" + c.arl
+// profileUnavailable handles a profile that can't be entered from this ARL
+// (another account, member removed from the plan…): the default-profile
+// session is still valid, so keep it rather than locking the user out, and
+// forget the selection.
+func (c *Client) profileUnavailable(s session, want, why string) error {
+	c.commitSession(s)
+	c.mu.Lock()
+	if c.profileID == want {
+		c.profileID = ""
 	}
+	c.mu.Unlock()
+	return fmt.Errorf("%w: %s", ErrProfileUnavailable, why)
+}
+
+// sessionCookie is the Cookie header for an ARL session bound to sid.
+func (c *Client) sessionCookie(sid string) string {
+	ck := "arl=" + c.arl // arl is immutable after New
+	if sid != "" {
+		ck += "; sid=" + sid
+	}
+	return ck
+}
+
+// commitSession publishes a staged session. All fields are written atomically so
+// concurrent readers never observe a half-updated session.
+func (c *Client) commitSession(s session) {
+	c.mu.Lock()
+	c.sid = s.sid
+	c.apiToken = s.apiToken
+	c.userID = s.userID
+	c.licenseToken = s.licenseToken
+	c.userName = s.userName
+	c.canHQ = s.canHQ
+	c.canHiFi = s.canHiFi
+	c.offerName = s.offerName
+	c.mu.Unlock()
+}
+
+// fetchSession runs deezer.getUserData with the given Cookie header and returns
+// the session it describes, without publishing it. prevSid is kept when Deezer
+// doesn't resend a sid (it may not when the request already carried one).
+func (c *Client) fetchSession(cookie, prevSid string) (session, error) {
 	u := gwURL + "?method=deezer.getUserData&input=3&api_version=1.0&api_token="
 	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader("{}"))
 	if err != nil {
-		return err
+		return session{}, err
 	}
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Content-Type", "application/json")
@@ -332,26 +380,21 @@ func (c *Client) loginSession(cookie string) error {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return classifyNet(err)
+		return session{}, classifyNet(err)
 	}
 	defer resp.Body.Close()
 
-	// Pull sid from Set-Cookie; when reusing a session Deezer may not resend it.
-	var sid string
+	// Pull sid from Set-Cookie.
+	sid := prevSid
 	for _, ck := range resp.Cookies() {
 		if strings.EqualFold(ck.Name, "sid") {
 			sid = ck.Value
 		}
 	}
-	if sid == "" && reuse {
-		c.mu.RLock()
-		sid = c.sid
-		c.mu.RUnlock()
-	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return session{}, err
 	}
 	var parsed struct {
 		Results struct {
@@ -374,13 +417,13 @@ func (c *Client) loginSession(cookie string) error {
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return fmt.Errorf("parse getUserData: %w", err)
+		return session{}, fmt.Errorf("parse getUserData: %w", err)
 	}
 	// A populated error envelope with empty results is a gateway/quota failure,
 	// not an auth one — don't misreport it as an expired ARL (unless it actually
 	// asks for auth).
 	if gwErr := gwError(body); gwErr != "" && !strings.Contains(gwErr, "AUTH") {
-		return fmt.Errorf("deezer gw deezer.getUserData: %s", gwErr)
+		return session{}, fmt.Errorf("deezer gw deezer.getUserData: %s", gwErr)
 	}
 	apiToken := parsed.Results.CheckForm
 	userID := parsed.Results.User.UserID.String()
@@ -388,7 +431,7 @@ func (c *Client) loginSession(cookie string) error {
 	if apiToken == "" || userID == "" || userID == "0" {
 		// A blank checkForm / user 0 is exactly what Deezer returns for an
 		// anonymous (= expired/invalid ARL) session.
-		return ErrARLExpired
+		return session{}, ErrARLExpired
 	}
 	userName := parsed.Results.User.BlogName
 	if userName == "" {
@@ -412,19 +455,16 @@ func (c *Client) loginSession(cookie string) error {
 		}
 	}
 
-	// Commit all session fields atomically so concurrent readers never observe a
-	// half-updated session (and concurrent re-logins don't tear each other's writes).
-	c.mu.Lock()
-	c.sid = sid
-	c.apiToken = apiToken
-	c.userID = userID
-	c.licenseToken = licenseToken
-	c.userName = userName
-	c.canHQ = canHQ
-	c.canHiFi = canHiFi
-	c.offerName = offerName
-	c.mu.Unlock()
-	return nil
+	return session{
+		sid:          sid,
+		apiToken:     apiToken,
+		userID:       userID,
+		licenseToken: licenseToken,
+		userName:     userName,
+		canHQ:        canHQ,
+		canHiFi:      canHiFi,
+		offerName:    offerName,
+	}, nil
 }
 
 // Account returns the logged-in user's plan + entitlement summary.
@@ -446,7 +486,12 @@ func (c *Client) Account() Account {
 
 // gwRaw performs one gw-light call and returns the raw response body.
 func (c *Client) gwRaw(method, jsonBody string) ([]byte, error) {
-	apiToken := c.apiTok()
+	return c.gwRawWith(c.apiTok(), c.cookie(), method, jsonBody)
+}
+
+// gwRawWith is gwRaw on an explicit session (Login uses it on a staged,
+// not-yet-published session).
+func (c *Client) gwRawWith(apiToken, cookie, method, jsonBody string) ([]byte, error) {
 	if apiToken == "" {
 		return nil, fmt.Errorf("not logged in")
 	}
@@ -455,7 +500,7 @@ func (c *Client) gwRaw(method, jsonBody string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Cookie", c.cookie())
+	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := c.http.Do(req)

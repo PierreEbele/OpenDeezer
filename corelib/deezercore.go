@@ -853,8 +853,10 @@ func DZProfilesJSON() *C.char {
 }
 
 // DZSwitchProfile switches the session to a Family profile (its userId) and
-// persists the choice so the next launch re-enters it. Returns 1 on success.
-// The caller should reload every library view (likes, playlists, Flow).
+// persists the choice so the next launch re-enters it. Returns 0 if the switch
+// failed (the previous profile is kept), 1 on success, 2 if the switch succeeded
+// but the choice couldn't be saved (the next launch reopens the old profile).
+// On 1 or 2 the caller should reload every library view (likes, playlists, Flow).
 //
 //export DZSwitchProfile
 func DZSwitchProfile(userID *C.char) C.int {
@@ -867,12 +869,13 @@ func DZSwitchProfile(userID *C.char) C.int {
 		odlog.Warn("switch profile: %v", err)
 		return 0
 	}
-	if err := config.SaveProfileID(id); err != nil {
-		odlog.Warn("save profile: %v", err)
-	}
 	odlog.Info("switched profile: %s", c.Account().Name)
 	// The library now belongs to another user: don't keep serving the old one.
 	refreshControlServer(c)
+	if err := config.SaveProfileID(id); err != nil {
+		odlog.Warn("save profile: %v", err)
+		return 2
+	}
 	return 1
 }
 
